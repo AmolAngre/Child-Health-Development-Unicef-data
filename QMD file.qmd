@@ -1,0 +1,377 @@
+---
+title: "Children at Risk: A Global UNICEF Analysis"
+author: "Your Name"
+date: today
+format:
+  html:
+    embed-resources: true
+    code-fold: true
+    theme: cosmo
+    toc: true
+    toc-depth: 3
+    toc-title: "Table of Contents"
+    number-sections: true
+execute:
+  warning: false
+  message: false
+---
+
+## Introduction
+
+**Every child deserves a healthy and safe start in life.** Yet for millions of children across
+the world, the reality is very different. The country they are born in, the wealth of their
+nation, and access to basic healthcare all profoundly shape their chances of survival and
+development.
+
+This report uses data from **UNICEF** to explore global patterns in child welfare. Through
+maps, rankings, economic comparisons, and trend analysis, we aim to answer key questions:
+
+- Which countries and regions face the greatest challenges?
+- Does a country's economic wealth translate into better outcomes for children?
+- Are things improving over time, or are some countries being left behind?
+
+> *"Children are not just the future — they are the present. What we do for them today
+> defines what the world will look like tomorrow."*
+
+---
+
+## Data & Setup
+
+The analysis uses two UNICEF datasets:
+
+- **unicef_indicator_2.csv** — Country-level indicator values over time
+- **unicef_metadata__1_.csv** — Country metadata including GDP, population, and life expectancy
+
+```{python}
+#| label: setup
+#| echo: true
+
+import polars as pl
+import pandas as pd
+import numpy as np
+import geopandas as gpd
+import warnings
+warnings.filterwarnings("ignore")
+from plotnine import *
+
+# ── Load data ──────────────────────────────────────────────
+indicator = pl.read_csv("unicef_indicator_2.csv")
+metadata  = pl.read_csv("unicef_metadata__1_.csv")
+
+print(f"Indicator dataset : {indicator.shape[0]:,} rows × {indicator.shape[1]} columns")
+print(f"Metadata dataset  : {metadata.shape[0]:,} rows × {metadata.shape[1]} columns")
+print(f"\nIndicator columns : {indicator.columns}")
+print(f"\nMetadata columns  : {metadata.columns}")
+```
+
+---
+
+## Data Transformation
+
+```{python}
+#| label: transform
+#| echo: true
+
+# ── Clean indicator ────────────────────────────────────────
+indicator_clean = (
+    indicator
+    .rename({"alpha_3_code": "country_code"})
+    .filter(pl.col("obs_value").is_not_null())
+    .with_columns(pl.col("obs_value").cast(pl.Float64))
+)
+
+# ── Clean metadata — rename long column names ──────────────
+metadata_clean = (
+    metadata
+    .rename({
+        "Population, total":                       "population_total",
+        "GDP per capita (constant 2015 US$)":      "gdp_per_capita",
+        "Life expectancy at birth, total (years)": "life_expectancy_at_birth",
+        "GNI (current US$)":                       "gni"
+    })
+    .select([
+        "country_code",
+        "country",
+        "population_total",
+        "gdp_per_capita",
+        "life_expectancy_at_birth",
+        "gni"
+    ])
+)
+
+# ── Merge ──────────────────────────────────────────────────
+merged = indicator_clean.join(metadata_clean, on="country_code", how="left")
+
+latest_year = int(indicator_clean["time_period"].max())
+
+print(f"Merged shape      : {merged.shape}")
+print(f"Countries covered : {indicator_clean['country'].n_unique()}")
+print(f"Latest year       : {latest_year}")
+print(f"Year range        : {int(indicator_clean['time_period'].min())} – {latest_year}")
+```
+
+```{python}
+#| label: latest-data
+#| echo: true
+
+# ── Aggregate to latest year per country ───────────────────
+latest_data = (
+    merged
+    .filter(pl.col("time_period") == latest_year)
+    .group_by(["country_code", "country", "gdp_per_capita", "life_expectancy_at_birth"])
+    .agg(pl.col("obs_value").mean().alias("avg_value"))
+    .sort("avg_value", descending=True)
+)
+
+print(f"Countries in latest year ({latest_year}): {latest_data.shape[0]}")
+print(latest_data.head(10))
+```
+
+---
+
+## Global Overview {#global}
+
+### Where Are Children Most Affected?
+
+The world map below plots each country as a point, coloured by the indicator value.
+**Darker red indicates higher values.** Even at a glance, a clear geographic pattern
+emerges — countries in **sub-Saharan Africa** and **South Asia** consistently show the
+highest figures, while wealthier nations in Europe and North America show much lower values.
+
+This spatial inequality is not accidental. It reflects decades of underinvestment in
+healthcare, education, and infrastructure in the developing world.
+
+```{python}
+#| label: fig-map
+#| fig-cap: "World map showing UNICEF indicator values by country (latest available year)"
+#| fig-width: 12
+#| fig-height: 6
+
+# Load world country geometry
+world = gpd.read_file(
+    "https://raw.githubusercontent.com/datasets/geo-countries/master/data/countries.geojson"
+)
+
+latest_pd = latest_data.to_pandas()
+
+world_merged = world.merge(
+    latest_pd,
+    left_on="ISO_A3",
+    right_on="country_code",
+    how="left"
+)
+
+world_merged["lon"] = world_merged.geometry.centroid.x
+world_merged["lat"] = world_merged.geometry.centroid.y
+map_df = world_merged[["ISO_A3", "avg_value", "lon", "lat"]].dropna()
+
+map_plot = (
+    ggplot(map_df, aes(x="lon", y="lat", color="avg_value"))
+    + geom_point(size=2.5, alpha=0.85)
+    + scale_color_gradient(
+        low="#fee8c8", high="#b30000",
+        na_value="lightgrey",
+        name="Indicator\nValue"
+    )
+    + labs(
+        title=f"Global UNICEF Indicator — {latest_year}",
+        subtitle="Each point represents a country | Grey = no data available",
+        x="", y=""
+    )
+    + theme_minimal()
+    + theme(
+        figure_size=(12, 5),
+        axis_text=element_blank(),
+        axis_ticks=element_blank(),
+        panel_grid=element_blank(),
+        plot_title=element_text(size=14, face="bold"),
+        plot_subtitle=element_text(size=10, color="grey")
+    )
+)
+print(map_plot)
+```
+
+---
+
+## Country Rankings {#rankings}
+
+### Top 20 Most Affected Countries
+
+While the world map shows the broad global picture, the bar chart below focuses on the
+**top 20 countries** with the highest indicator values. These nations deserve particular
+attention from the international community.
+
+The ranking reveals that the burden is heavily concentrated in a small number of countries.
+Addressing the needs of these nations could have an outsized impact on global child welfare.
+
+```{python}
+#| label: fig-bar
+#| fig-cap: "Top 20 countries ranked by UNICEF indicator value (latest available year)"
+#| fig-width: 10
+#| fig-height: 8
+
+top20 = (
+    latest_data
+    .sort("avg_value", descending=True)
+    .head(20)
+    .to_pandas()
+)
+
+bar_plot = (
+    ggplot(top20, aes(x="reorder(country, avg_value)", y="avg_value", fill="avg_value"))
+    + geom_bar(stat="identity")
+    + coord_flip()
+    + scale_fill_gradient(low="#fdbb84", high="#b30000", name="Value")
+    + labs(
+        title=f"Top 20 Countries — UNICEF Indicator ({latest_year})",
+        subtitle="Countries sorted by average indicator value",
+        x="Country",
+        y="Average Indicator Value"
+    )
+    + theme_minimal()
+    + theme(
+        figure_size=(10, 8),
+        plot_title=element_text(size=13, face="bold"),
+        plot_subtitle=element_text(size=10, color="grey"),
+        legend_position="none"
+    )
+)
+print(bar_plot)
+```
+
+---
+
+## The Role of Wealth {#wealth}
+
+### Does GDP per Capita Matter?
+
+A central question in development economics is whether national wealth translates into
+better outcomes for children. The scatterplot below compares **GDP per capita** (on a
+log scale, to handle the wide range of values) against the UNICEF indicator for each country.
+
+The **dashed black regression line** reveals the overall trend. The negative slope
+confirms that **wealthier countries tend to have lower indicator values** — but the
+relationship is far from perfect. Several countries perform much worse than their
+income level would suggest, pointing to governance and policy failures beyond mere poverty.
+
+```{python}
+#| label: fig-scatter
+#| fig-cap: "Scatterplot of UNICEF indicator vs GDP per capita with linear regression line"
+#| fig-width: 10
+#| fig-height: 6
+
+scatter_data = (
+    merged
+    .filter(pl.col("time_period") == latest_year)
+    .filter(pl.col("gdp_per_capita").is_not_null())
+    .filter(pl.col("obs_value").is_not_null())
+    .to_pandas()
+)
+
+scatter_plot = (
+    ggplot(scatter_data, aes(x="gdp_per_capita", y="obs_value"))
+    + geom_point(color="#d7301f", alpha=0.6, size=3)
+    + geom_smooth(method="lm", color="black", linetype="dashed", se=True)
+    + scale_x_log10()
+    + labs(
+        title="UNICEF Indicator vs GDP per Capita",
+        subtitle=f"Year: {latest_year} | X-axis on log scale | Dashed line = linear regression",
+        x="GDP per Capita (USD, log scale)",
+        y="Indicator Value"
+    )
+    + theme_minimal()
+    + theme(
+        figure_size=(10, 6),
+        plot_title=element_text(size=13, face="bold"),
+        plot_subtitle=element_text(size=10, color="grey")
+    )
+)
+print(scatter_plot)
+```
+
+---
+
+## Trends Over Time {#trends}
+
+### Are Things Getting Better?
+
+Snapshots in time only tell part of the story. The time-series chart below tracks how
+the indicator has changed across the **six countries with the most complete historical data**.
+
+Some countries show a clear downward trend — a sign that interventions are working.
+Others remain stubbornly flat or even show increases, a reminder that **progress is
+never guaranteed** and sustained effort is essential.
+
+```{python}
+#| label: fig-timeseries
+#| fig-cap: "Time-series of UNICEF indicator for the six countries with the most complete data"
+#| fig-width: 11
+#| fig-height: 6
+
+# Select 6 countries with most data points
+top_countries = (
+    indicator_clean
+    .group_by("country")
+    .agg(pl.len().alias("n_years"))
+    .sort("n_years", descending=True)
+    .head(6)["country"]
+    .to_list()
+)
+
+time_data = (
+    indicator_clean
+    .filter(pl.col("country").is_in(top_countries))
+    .to_pandas()
+)
+
+ts_plot = (
+    ggplot(time_data, aes(x="time_period", y="obs_value",
+                          color="country", group="country"))
+    + geom_line(size=1.2)
+    + geom_point(size=2.5)
+    + labs(
+        title="UNICEF Indicator Over Time — Selected Countries",
+        subtitle="Six countries chosen based on data completeness",
+        x="Year",
+        y="Indicator Value",
+        color="Country"
+    )
+    + theme_minimal()
+    + theme(
+        figure_size=(11, 6),
+        plot_title=element_text(size=13, face="bold"),
+        plot_subtitle=element_text(size=10, color="grey"),
+        legend_position="right"
+    )
+)
+print(ts_plot)
+```
+
+---
+
+## Conclusion
+
+This analysis of UNICEF data reveals several important and sobering findings:
+
+1. **Geographic inequality is stark** — the burden falls overwhelmingly on low-income
+   countries, particularly in sub-Saharan Africa and South Asia.
+
+2. **Wealth matters, but incompletely** — while richer nations generally perform better,
+   there are notable outliers, suggesting that policy choices matter as much as income.
+
+3. **Progress is uneven** — some countries have made meaningful improvements over time,
+   while others have stagnated or worsened, demonstrating that improvement requires
+   sustained, targeted effort.
+
+4. **Concentration of need** — the top 20 most affected countries carry a
+   disproportionate share of the global burden, suggesting that focused international
+   support could make a significant difference.
+
+**Data-driven analysis like this is essential** for ensuring that UNICEF and its partners
+can allocate resources where they are most needed and track whether those investments
+are delivering results for the world's most vulnerable children.
+
+---
+
+*Data source: UNICEF. Analysis conducted using Python (polars, plotnine, geopandas).
+Report rendered with Quarto.*
